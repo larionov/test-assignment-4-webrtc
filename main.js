@@ -22,6 +22,17 @@ var audiosContainer = document.getElementById('audios-container');
 var mediaRecorder;
 var index = 1;
 
+function encode64(buffer) {
+    var binary = '',
+        bytes = new Uint8Array( buffer ),
+        len = bytes.byteLength;
+
+    for (var i = 0; i < len; i++) {
+        binary += String.fromCharCode( bytes[ i ] );
+    }
+    return window.btoa( binary );
+}
+
 var onMediaSuccess = function(stream) {
 	var audio = document.querySelector('#audio');
 
@@ -36,12 +47,13 @@ var onMediaSuccess = function(stream) {
 
 	mediaRecorder = new MediaStreamRecorder(stream);
 	mediaRecorder.mimeType = 'audio/ogg';
-	mediaRecorder.ondataavailable = function(blob) {
+	mediaRecorder.ondataavailable = function(blob, e) {
 		var a = document.createElement('a');
 		a.target = '_blank';
 		a.innerHTML = 'Open Recorded Audio No. ' + (index++) + ' (Size: ' + bytesToSize(blob.size) + ') Time Length: ' + getTimeLength(timeInterval);
 
-		a.href = URL.createObjectURL(blob);
+		var url = 'data:audio/mp3;base64,'+encode64(e.data.buf);
+		a.href = url;
 
 		audiosContainer.appendChild(a);
 		audiosContainer.appendChild(document.createElement('hr'));

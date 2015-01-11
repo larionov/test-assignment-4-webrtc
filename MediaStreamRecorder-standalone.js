@@ -312,47 +312,134 @@ function StereoAudioRecorder(mediaStream, root) {
     var audioContext;
     var context;
 
+    var WORKER_PATH = 'recorderWorker.js';
+    var encoderWorker = new Worker('mp3Worker.js');
 
+    var worker = new Worker(WORKER_PATH);
 
-    function downsampleBuffer(buffer, rate) {
-        if (rate == sampleRate) {
-            return buffer;
+    function encode64(buffer) {
+        var binary = '',
+            bytes = new Uint8Array( buffer ),
+            len = bytes.byteLength;
+
+        for (var i = 0; i < len; i++) {
+            binary += String.fromCharCode( bytes[ i ] );
         }
-        if (rate > sampleRate) {
-            throw "downsampling rate show be smaller than original sample rate";
-        }
-        var sampleRateRatio = sampleRate / rate;
-        var newLength = Math.round(buffer.length / sampleRateRatio);
-        var result = new Float32Array(newLength);
-        var offsetResult = 0;
-        var offsetBuffer = 0;
-        while (offsetResult < result.length) {
-            var nextOffsetBuffer = Math.round((offsetResult + 1) * sampleRateRatio);
-            var accum = 0, count = 0;
-            for (var i = offsetBuffer; i < nextOffsetBuffer && i < buffer.length; i++) {
-                accum += buffer[i];
-                count++;
+        return window.btoa( binary );
+    }
+
+    function parseWav(wav) {
+        function readInt(i, bytes) {
+            var ret = 0,
+                shft = 0;
+
+            while (bytes) {
+                ret += wav[i] << shft;
+                shft += 8;
+                i++;
+                bytes--;
             }
-            result[offsetResult] = accum / count;
-            offsetResult++;
-            offsetBuffer = nextOffsetBuffer;
+            return ret;
         }
-        return result;
+        if (readInt(20, 2) != 1) throw 'Invalid compression code, not PCM';
+        if (readInt(22, 2) != 1) throw 'Invalid number of channels, not 1';
+        return {
+            sampleRate: readInt(24, 4),
+            bitsPerSample: readInt(34, 2),
+            samples: wav.subarray(44)
+        };
     }
 
-    function exportWAV(rate, type) {
-        var bufferL = mergeBuffers(recBuffersL, recLength);
-        var bufferR = mergeBuffers(recBuffersR, recLength);
-        var interleaved = interleave(bufferL, bufferR);
-        var downsampledBuffer = downsampleBuffer(interleaved, rate);
-        var dataview = encodeWAV(rate, downsampledBuffer, false);
-        var audioBlob = new Blob([ dataview ], {
-            type : type
-        });
-
-        return audioBlob;
+    function Uint8ArrayToFloat32Array(u8a){
+        var f32Buffer = new Float32Array(u8a.length);
+        for (var i = 0; i < u8a.length; i++) {
+            var value = u8a[i<<1] + (u8a[(i<<1)+1]<<8);
+            if (value >= 0x8000) value |= ~0x7FFF;
+            f32Buffer[i] = value / 0x8000;
+        }
+        return f32Buffer;
     }
 
+    var convertToMP3 = function (blob, callback) {
+
+
+      console.log("the blob " +  blob + " " + blob.size + " " + blob.type);
+
+      var arrayBuffer;
+      var fileReader = new FileReader();
+
+      fileReader.onload = function(){
+        arrayBuffer = this.result;
+        var buffer = new Uint8Array(arrayBuffer),
+        data = parseWav(buffer);
+
+        console.log(data);
+        console.log("Converting to Mp3");
+
+        encoderWorker.postMessage({ cmd: 'init', config:{
+            mode : 3,
+            channels:1,
+            samplerate: data.sampleRate,
+            bitrate: data.bitsPerSample
+        }});
+
+        encoderWorker.postMessage({ cmd: 'encode', buf: Uint8ArrayToFloat32Array(data.samples) });
+        encoderWorker.postMessage({ cmd: 'finish'});
+        encoderWorker.onmessage = function(e) {
+            if (e.data.cmd == 'data') {
+
+                console.log("Done converting to Mp3");
+
+                /*var audio = new Audio();
+                audio.src = 'data:audio/mp3;base64,'+encode64(e.data.buf);
+                audio.play();*/
+
+                //console.log ("The Mp3 data " + e.data.buf);
+
+                var mp3Blob = new Blob([new Uint8Array(e.data.buf)], {type: 'audio/mp3'});
+                // uploadAudio(mp3Blob);
+                root.ondataavailable(mp3Blob, e);
+                // var url = 'data:audio/mp3;base64,'+encode64(e.data.buf);
+                // var li = document.createElement('li');
+                // var au = document.createElement('audio');
+                // var hf = document.createElement('a');
+
+                // au.controls = true;
+                // au.src = url;
+                // hf.href = url;
+                // hf.download = 'audio_recording_' + new Date().getTime() + '.mp3';
+                // hf.innerHTML = hf.download;
+                // li.appendChild(au);
+                // li.appendChild(hf);
+                // recordingslist.appendChild(li);
+
+            }
+        };
+      };
+
+      fileReader.readAsArrayBuffer(blob);
+      callback(blob);
+    }
+
+
+    this.clear = function(){
+      worker.postMessage({ command: 'clear' });
+    }
+
+    this.getBuffer = function(cb) {
+      currCallback = cb || config.callback;
+      worker.postMessage({ command: 'getBuffer' })
+    }
+
+    this.exportWAV = function(cb, type){
+      currCallback = cb || config.callback;
+      type = type || config.type || 'audio/wav';
+      if (!currCallback) throw new Error('Callback not set');
+      worker.postMessage({
+        command: 'exportWAV',
+        type: type
+      });
+    }
 
     this.record = function() {
         recording = true;
@@ -380,11 +467,10 @@ function StereoAudioRecorder(mediaStream, root) {
 
         // we flat the left and right channels down
         var leftBuffer = mergeBuffers(internal_leftchannel, internal_recordingLength);
-        var rightBuffer = mergeBuffers(internal_leftchannel, internal_recordingLength);
+        // var rightBuffer = mergeBuffers(internal_leftchannel, internal_recordingLength);
 
         // we interleave both channels together
-        var interleaved = interleave(leftBuffer, rightBuffer);
-        var interleaved = downsampleBuffer(interleaved, downRate);
+        var interleaved = leftBuffer;//interleave(leftBuffer, rightBuffer);
 
         // we create our wav file
         var buffer = new ArrayBuffer(44 + interleaved.length * 2);
@@ -399,9 +485,9 @@ function StereoAudioRecorder(mediaStream, root) {
         view.setUint32(16, 16, true);
         view.setUint16(20, 1, true);
         // stereo (2 channels)
-        view.setUint16(22, 2, true);
-        view.setUint32(24, downRate, true);
-        view.setUint32(28, downRate * 4, true);
+        view.setUint16(22, 1, true);
+        view.setUint32(24, sampleRate, true);
+        view.setUint32(28, sampleRate * 4, true);
         view.setUint16(32, 4, true);
         view.setUint16(34, 16, true);
         // data sub-chunk
@@ -419,8 +505,11 @@ function StereoAudioRecorder(mediaStream, root) {
 
         // our final binary blob
         var blob = new Blob([view], { type: 'audio/wav' });
+        convertToMP3(blob, function (blob) {
 
-        root.ondataavailable(blob);
+
+        });
+
     };
 
     this.stop = function() {
