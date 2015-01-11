@@ -34,7 +34,6 @@ angular.module('webrtcTest')
 
             mediaRecorder = new MediaStreamRecorder(stream);
             mediaRecorder.mimeType = 'audio/ogg';
-            mediaRecorder.sampleRate = 4800;
             mediaRecorder.ondataavailable = function(blob) {
                 var a = document.createElement('a');
                 a.target = '_blank';
